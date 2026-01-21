@@ -1,20 +1,97 @@
-import os
-import json
-import tkinter as tk
-from tkinter import filedialog, messagebox
-from pytube import YouTube
-# from moviepy.editor import AudioFileClip
-from yt_dlp import YoutubeDL
-from savify import Savify
-from savify.types import Type, Format
-import importlib
-import subprocess
-import yt_dlp
 import pandas as pd
 import yt_dlp
 import librosa
 import numpy as np
+import sqlite3
+import hashlib
+from datetime import datetime
+from dotenv import load_dotenv
 import os
+
+
+def make_song_id(row):
+    base = f"{row['artist']}_{row['title']}_{row['track_id']}"
+    return hashlib.md5(base.lower().encode()).hexdigest()
+
+
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS songs (
+            song_id TEXT PRIMARY KEY,
+            title TEXT,
+            artist TEXT,
+            artist_id TEXT,
+            track_id TEXT,
+            duration TEXT,
+            duration_sec REAL,
+            url TEXT,
+            upload_date TEXT,
+            likes INTEGER,
+            reposts INTEGER,
+            comments INTEGER,
+            plays INTEGER,
+            thumbnail TEXT,
+            genre TEXT,
+            filepath TEXT,
+            downloaded INTEGER,
+            source TEXT,
+            bpm REAL,
+            key TEXT,
+            mode TEXT,
+            camelot TEXT,
+            beat_strength REAL,
+            rhythm_regularity REAL,
+            harmonic_clarity REAL,
+            energy REAL,
+            loudness REAL,
+            bass_energy REAL,
+            mid_energy REAL,
+            high_energy REAL,
+            brightness REAL,
+            spectral_flatness REAL,
+            spectral_contrast REAL,
+            harmonic_energy REAL,
+            percussive_energy REAL,
+            percussiveness REAL,
+            mfcc_1 REAL, mfcc_2 REAL, mfcc_3 REAL, mfcc_4 REAL, mfcc_5 REAL,
+            mfcc_6 REAL, mfcc_7 REAL, mfcc_8 REAL, mfcc_9 REAL, mfcc_10 REAL,
+            mfcc_11 REAL, mfcc_12 REAL, mfcc_13 REAL,
+            danceability REAL,
+            acousticness REAL,
+            instrumentalness REAL,
+            vocal_presence REAL,
+            valence REAL,
+            energy_variance REAL,
+            speechiness REAL,
+            liveness REAL,
+            warmth REAL,
+            aggression REAL,
+            complexity REAL,
+            analyzed INTEGER,
+            analyzed_at TEXT
+        )
+    """)
+    conn.close()
+
+
+def load_existing_ids():
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        df = pd.read_sql("SELECT song_id FROM songs", conn)
+    except:
+        df = pd.DataFrame(columns=["song_id"])
+    conn.close()
+    return set(df["song_id"])
+
+
+def save_to_db(df):
+    df = df.copy()
+    df["analyzed_at"] = datetime.now().isoformat()
+    conn = sqlite3.connect(DB_PATH)
+    df.to_sql("songs", conn, if_exists="append", index=False)
+    conn.close()
+
 
 def get_playlist_track_info(playlist_url:str) -> pd.DataFrame:
 
@@ -152,6 +229,8 @@ def download_playlist_files(soundcloud_track_info_df:pd.DataFrame, download_fold
 
 def analyze_downloaded_tracks(songs_df: pd.DataFrame, download_folder_path: str) -> pd.DataFrame:
     os.makedirs(download_folder_path, exist_ok=True)
+
+    songs_df["analyzed"] = False
 
     print("Files in download folder:")
     for idx, row in songs_df.iterrows():
@@ -338,14 +417,43 @@ def analyze_downloaded_tracks(songs_df: pd.DataFrame, download_folder_path: str)
     return songs_df
 
 
-playlist_url = "https://soundcloud.com/doan-macloan/sets/test"
+load_dotenv()
+
+playlist_url = os.getenv("PLAYLIST_URL")
+download_folder_path = os.getenv("DOWNLOAD_PATH")
+DB_PATH = os.getenv("DB_PATH")
+
+# --- INIT DB ---
+init_db()
+
+# --- GET PLAYLIST ---
 soundcloud_track_info_df = get_playlist_track_info(playlist_url)
-print(soundcloud_track_info_df)
 
-download_folder_path = "C:/Users/danie/Music/soundcloud_music/downloads"
-soundcloud_track_post_dl = download_playlist_files(soundcloud_track_info_df, download_folder_path)
-print(soundcloud_track_post_dl)
+# --- CREATE IDS ---
+soundcloud_track_info_df["song_id"] = soundcloud_track_info_df.apply(make_song_id, axis=1)
 
+# --- LOAD EXISTING ---
+existing_ids = load_existing_ids()
+
+# --- FILTER NEW ---
+df_new = soundcloud_track_info_df[
+    ~soundcloud_track_info_df["song_id"].isin(existing_ids)
+].copy()
+
+print(f"Skipping {len(soundcloud_track_info_df) - len(df_new)} existing songs")
+print(f"Processing {len(df_new)} new songs")
+
+if df_new.empty:
+    print("Nothing new to process.")
+    exit()
+
+# --- DOWNLOAD ---
+soundcloud_track_post_dl = download_playlist_files(df_new, download_folder_path)
+
+# --- ANALYZE ---
 soundcloud_analyzed_tracks = analyze_downloaded_tracks(soundcloud_track_post_dl, download_folder_path)
 
-print(soundcloud_analyzed_tracks)
+# --- SAVE ---
+save_to_db(soundcloud_analyzed_tracks)
+
+print("Saved new songs to database.")
